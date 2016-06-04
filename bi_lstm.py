@@ -4,7 +4,7 @@
 # name : zhang hao
 # mail : hao-zhang@pku.edu.cn
 # 
-# it is just a simple lstm
+# it is just a simple bi-lstm
 # --------------------------
 
 import numpy
