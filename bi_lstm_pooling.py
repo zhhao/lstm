@@ -1,11 +1,12 @@
 # encoding:utf8
 
-# --------------------------
+# -----------------------------------
 # name : zhang hao
 # mail : hao-zhang@pku.edu.cn
 # 
-# it is just a simple bi-lstm
-# --------------------------
+# it is a simple bi-lstm 
+# and get a maxpooling of the two h
+# -----------------------------------
 
 class BiLstmLayer_pooling(object):
     def __init__(self, seq_x, rng, n_in, n_h, W_s = None, U_s = None, b_s = None, c0 = None, vo = None, activation = None):
