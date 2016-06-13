@@ -78,7 +78,7 @@ class BiLstmLayer_pooling(object):
                                 non_sequences = [self.W_s[1], self.U_s[1], self.b_s[1], self.vo[1]],
                                 n_steps = seq_x.shape[0])
         self.h_l_ = h_l
-        self.h_r_ = h_r
+        self.h_r_ = h_r[::-1]
 
     def get_h(self):
         return T.concatenate([self.h_l_, self.h_r_], axis = 1)
