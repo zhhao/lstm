@@ -1,0 +1,283 @@
+# @author : zhanghao
+# hao-zhang@pku.edu.com
+#
+#
+# encoding:utf8
+
+
+import six.moves.cPickle as pickle
+
+from collections import OrderedDict
+import sys
+import time
+
+import numpy
+import numpy as np
+import theano
+from theano import config
+import theano.tensor as T
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from theano import function, config, shared, tensor, sandbox
+import theano.sandbox.cuda.basic_ops
+
+
+
+
+def get_minibatches_idx(n, minibatch_size, shuffle = False):
+	"""
+	Used to shuffle the dataset at each iteration.
+	"""
+
+	idx_list = range(n)
+
+	if shuffle:
+		numpy.random.shuffle(idx_list)
+
+	minibatches = []
+	minibatch_start = 0
+	for i in range(n // minibatch_size):
+		minibatches.append(idx_list[minibatch_start:
+									minibatch_start + minibatch_size])
+		minibatch_start += minibatch_size
+
+	if (minibatch_start != n):
+		# Make a minibatch out of what is left
+		minibatches.append(idx_list[minibatch_start:])
+
+	return zip(range(len(minibatches)), minibatches)
+
+
+def prepare_data(seqs, maxlen=None):
+	"""Create the matrices from the datasets.
+
+	This pad each sequence to the same lenght: the lenght of the
+	longuest sequence or maxlen.
+
+	if maxlen is set, we will cut all sequence to this maximum
+	lenght.
+
+	This swap the axis!
+	"""
+	# x: a list of sentences
+	lengths = [len(s) for s in seqs]
+
+	if maxlen is not None:
+		new_seqs = []
+		new_labels = []
+		new_lengths = []
+		for l, s, y in zip(lengths, seqs, labels):
+			if l < maxlen:
+				new_seqs.append(s)
+				new_labels.append(y)
+				new_lengths.append(l)
+		lengths = new_lengths
+		labels = new_labels
+		seqs = new_seqs
+
+		if len(lengths) < 1:
+			return None, None, None
+
+	n_samples = len(seqs)
+	maxlen = numpy.max(lengths)
+
+	x = numpy.zeros((n_samples, maxlen)).astype('int64')
+	x_mask = numpy.zeros((n_samples, maxlen)).astype(theano.config.floatX)
+	for idx, s in enumerate(seqs):
+		x[idx][:lengths[idx]] = s
+		x_mask[idx][:lengths[idx]] = 1.
+
+	return [x.transpose(), x_mask.transpose()]
+
+
+
+
+
+class LstmLayer(object):
+
+	def __init__(self, mask, seq_x, rng, n_in, n_h, W_s = None, U_s = None, b_s = None, c0 = None, vo = None, activation = None):
+  
+		initialize_range = numpy.sqrt(6. / (n_in + n_h))
+
+		if W_s is None:
+			W_value = numpy.asarray(rng.uniform(
+				low = -initialize_range,
+				high = initialize_range,
+				size = (2, 4, n_in, n_h)), dtype = theano.config.floatX)
+			W_s = theano.shared(value = W_value, name = "W_s", borrow = True)
+
+		if U_s is None:
+			U_value = numpy.asarray(rng.uniform(
+				low = -initialize_range,
+				high = initialize_range,
+				size = (2, 4, n_h, n_h)), dtype = theano.config.floatX)
+			U_s = theano.shared(value = U_value, name = "U_s", borrow = True)
+
+		if b_s is None:
+			b_value = numpy.asarray(rng.uniform(
+				low = -initialize_range,
+				high = initialize_range,
+				size = (2, 4, n_h)), dtype = theano.config.floatX)
+			b_s = theano.shared(value = b_value, name = "b_s", borrow = True)
+
+		if vo is None:
+			v_o_value = numpy.asarray(rng.uniform(
+				low=-initialize_range,
+				high=initialize_range,
+				size=(2, n_h, n_h)), dtype=theano.config.floatX)
+			vo = theano.shared(value = v_o_value, name='v_o', borrow=True)
+
+		self.W_s = W_s
+		self.U_s = U_s
+		self.b_s = b_s
+		self.vo = vo
+		# self.c0 = c0
+		# self.h0 = T.tanh(self.c0)
+
+		# n_samples = seq_x.shape[0]
+		# self.params = [self.W_s, self.U_s, self.b_s, self.vo]
+		self.params = [self.W_s, self.U_s, self.b_s, self.vo]
+
+		def _step(m_, x, c_, h_, W, U, b, vo):
+			i = T.nnet.sigmoid(T.dot(x, W[0]) + T.dot(h_, U[0]) + b[0])
+			f = T.nnet.sigmoid(T.dot(x, W[1]) + T.dot(h_, U[1]) + b[1])
+			c = i * (T.tanh(T.dot(x, W[2]) + T.dot(h_, U[2]) + b[2])) + f * c_
+			ct = m_[:, None] * c + (1 - m_)[:, None] * c_
+			o = T.nnet.sigmoid(T.dot(x, W[3]) + T.dot(h_, U[3]) + T.dot(c, vo)  + b[3])
+			h = o * T.tanh(c)
+			ht = m_[:, None] * h + (1 - m_)[:, None] * h_
+
+			return [ct, ht]
+
+		rval_l, updates_l = theano.scan(fn = _step, 
+								sequences = [mask, seq_x], 
+								outputs_info = [tensor.alloc(numpy.asarray(0., dtype=theano.config.floatX), batch_size ,n_h), tensor.alloc(numpy.asarray(0., dtype=theano.config.floatX), batch_size, n_h)],
+								non_sequences = [self.W_s[0], self.U_s[0], self.b_s[0], self.vo[0]],
+								n_steps = seq_x.shape[0])
+		rval_r, updates_r = theano.scan(fn = _step, 
+								sequences = [mask[::-1], seq_x[::-1]],
+								outputs_info = [tensor.alloc(numpy.asarray(0., dtype=theano.config.floatX), batch_size ,n_h), tensor.alloc(numpy.asarray(0., dtype=theano.config.floatX), batch_size, n_h)],
+								non_sequences = [self.W_s[1], self.U_s[1], self.b_s[1], self.vo[1]],
+								n_steps = seq_x.shape[0])
+
+		self.h_l_ = rval_l[1]
+		self.h_r_ = rval_r[1][::-1]
+		self.mask = mask
+
+	def get_h_temp(self):
+		return [self.h_l_, self.h_r_, self.mask]
+
+	def get_h(self):
+		return T.concatenate([self.h_l_, self.h_r_], axis = 2)
+
+	
+	def get_h_pooling(self):
+		self.new_h = T.concatenate([self.h_l_.dimshuffle("x", 0, 1), self.h_r_.dimshuffle("x", 0, 1)] , axis = 0)
+		self.new_h = self.new_h.dimshuffle(1,2,0)
+		self.new_h = downsample.max_pool_2d(self.new_h, [1,2], ignore_border = False)
+		self.new_h = self.new_h[:, :, 0]
+
+		return self.new_h
+
+
+
+class LRLayer(object):
+
+	def __init__(self, y, rng, pad_mask, seq_x, n_in, n_out, count):
+
+		W_values = numpy.asarray(
+			rng.uniform(
+				low=-numpy.sqrt(6. / (n_in + n_out)),
+				high=numpy.sqrt(6. / (n_in + n_out)),
+				size=(n_in, n_out)
+			),
+			dtype=theano.config.floatX
+		)
+		self.W = theano.shared(value=W_values, name='lr_W', borrow=True)
+
+
+		self.b = theano.shared(
+			value = numpy.zeros(
+				(n_out),
+				dtype = theano.config.floatX
+			),
+			name = 'lr_b',
+			borrow = True
+		)
+
+		self.params = [self.W, self.b]
+
+		self.seq_x = seq_x
+		self.pad_mask = pad_mask
+		self.y = y
+		self.count = count
+		
+		max_len = self.seq_x.shape[1]
+
+		self.temp_seq_x = T.reshape(self.seq_x, (batch_size * max_len, n_in))
+
+		self.temp_p_y_given_x = T.nnet.softmax(T.dot(self.temp_seq_x, self.W) + self.b)
+
+		self.y_pred = T.argmax(self.temp_p_y_given_x, axis = 1)
+		
+
+	def get_temp_result(self):
+		temp_result = T.log(self.temp_p_y_given_x)[T.arange(self.y.shape[0]), self.y]
+		temp_log = T.dot(temp_result, self.pad_mask)
+		return [self.temp_p_y_given_x, self.pad_mask]
+
+	def negative_log_likelihood(self): 
+		temp_result = T.log(self.temp_p_y_given_x)[T.arange(self.y.shape[0]), self.y]
+		temp_log = T.dot(temp_result, self.pad_mask)[0]
+		return - (temp_log / self.count)
+		# return -T.mean(temp_result)
+
+	def decode(self):
+		matrix = [[],[],[]]
+		new_p_y_given_x = []
+		for i in range(len(self.temp_p_y_given_x)):
+			temp_p_y = self.temp_p_y_given_x[i]
+
+
+
+
+class HiddenLayer(object):
+
+	def __init__(self, rng, seq_x, n_in, n_out, activation=T.tanh):
+		W_values = numpy.asarray(
+			rng.uniform(
+				low=-numpy.sqrt(6. / (n_in + n_out)),
+				high=numpy.sqrt(6. / (n_in + n_out)),
+				size=(n_in, n_out)
+			),
+			dtype=theano.config.floatX
+		)
+		if activation == theano.tensor.nnet.sigmoid:
+			W_values *= 4
+
+		self.W = theano.shared(value=W_values, name='hidden_W', borrow=True)
+
+		b_values = numpy.zeros((n_out), dtype=theano.config.floatX)
+		self.b = theano.shared(value=b_values, name='hidden_b', borrow=True)
+
+		lin_output = T.dot(seq_x, self.W) + self.b
+		self.outputs = (
+			lin_output if activation is None
+			else activation(lin_output)
+		)
+
+		self.lstm_outputs = self.outputs
+		self.outputs = self.outputs.dimshuffle(1,0,2)
+
+
+		self.params = [self.W, self.b]
+
+
+
+
+
+
+
+
+
+
+
